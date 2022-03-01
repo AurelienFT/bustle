@@ -27,7 +27,8 @@
     broken_intra_doc_links
 )]
 
-use std::{sync::Arc, time::Duration};
+use core::num;
+use std::{sync::Arc, time::Duration, fmt};
 
 use rand::prelude::*;
 use tracing::{debug, info, info_span};
@@ -96,6 +97,24 @@ impl Mix {
     }
 }
 
+/// WIP
+#[derive(Clone, Copy, Debug)]
+pub enum Threads {
+    /// WIP
+    CommonThreads(usize),
+    /// WIP
+    SeparatedReadWriteThreads(usize, usize)
+}
+
+impl fmt::Display for Threads {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            Threads::CommonThreads(number) => write!(f, "{}", number),
+            Threads::SeparatedReadWriteThreads(number_read, number_write) => write!(f, "{} read and {} write", number_read, number_write)
+        }
+    }
+}
+
 /// A benchmark workload builder.
 #[derive(Clone, Copy, Debug)]
 pub struct Workload {
@@ -112,7 +131,7 @@ pub struct Workload {
     ops_f: f64,
 
     /// Number of threads to run the benchmark with.
-    threads: usize,
+    threads: Threads,
 
     /// Random seed to randomize the workload.
     ///
@@ -187,7 +206,7 @@ pub struct Measurement {
 
 impl Workload {
     /// Start building a new benchmark workload.
-    pub fn new(threads: usize, mix: Mix) -> Self {
+    pub fn new(threads: Threads, mix: Mix) -> Self {
         Self {
             mix,
             initial_cap_log2: 25,
@@ -295,7 +314,7 @@ impl Workload {
         let mut rng: rand::rngs::SmallRng = rand::SeedableRng::from_seed(seed);
 
         // NOTE: it'd be nice to include std::intrinsics::type_name::<T> here
-        let span = info_span!("benchmark", mix = ?self.mix, threads = self.threads);
+        let span = info_span!("benchmark", mix = ?self.mix /*, threads = self.threads*/);
         let _guard = span.enter();
         debug!(initial_capacity, total_ops, ?seed, "workload parameters");
 
@@ -318,10 +337,14 @@ impl Workload {
         let insert_keys = std::cmp::max(initial_capacity, max_insert_ops) + prefill;
         // Round this quantity up to a power of 2, so that we can use an LCG to cycle over the
         // array "randomly".
+        let total_threads = match self.threads {
+            Threads::CommonThreads(number_threads) => number_threads,
+            Threads::SeparatedReadWriteThreads(number_read_threads, number_write_threads) => number_read_threads + number_write_threads
+        };
         let insert_keys_per_thread =
-            ((insert_keys + self.threads - 1) / self.threads).next_power_of_two();
+            ((insert_keys + total_threads - 1) / total_threads).next_power_of_two();
         let mut generators = Vec::new();
-        for _ in 0..self.threads {
+        for _ in 0..total_threads {
             let mut thread_seed = [0u8; 16];
             rng.fill_bytes(&mut thread_seed[..]);
             generators.push(std::thread::spawn(move || {
@@ -341,7 +364,7 @@ impl Workload {
         let table = Arc::new(T::with_capacity(initial_capacity));
 
         // And fill it
-        let prefill_per_thread = prefill / self.threads;
+        let prefill_per_thread = prefill / total_threads;
         let mut prefillers = Vec::new();
         for keys in keys {
             let table = Arc::clone(&table);
@@ -360,23 +383,46 @@ impl Workload {
             .collect();
 
         info!("start workload mix");
-        let ops_per_thread = total_ops / self.threads;
         let op_mix = Arc::new(op_mix.into_boxed_slice());
         let start = std::time::Instant::now();
-        let mut mix_threads = Vec::with_capacity(self.threads);
-        for keys in keys {
-            let table = Arc::clone(&table);
-            let op_mix = Arc::clone(&op_mix);
-            mix_threads.push(std::thread::spawn(move || {
-                let mut table = table.pin();
-                mix(
-                    &mut table,
-                    &keys,
-                    &op_mix,
-                    ops_per_thread,
-                    prefill_per_thread,
-                )
-            }));
+        let mut mix_threads = Vec::with_capacity(total_threads);
+        match self.threads {
+            Threads::CommonThreads(number_threads) => {
+                let ops_per_thread = total_ops / number_threads;
+                for keys in keys {
+                    let table = Arc::clone(&table);
+                    let op_mix = Arc::clone(&op_mix);
+                    mix_threads.push(std::thread::spawn(move || {
+                        let mut table = table.pin();
+                        mix(
+                            &mut table,
+                            &keys,
+                            &op_mix,
+                            ops_per_thread,
+                            prefill_per_thread,
+                        )
+                    }));
+                }
+            },
+            Threads::SeparatedReadWriteThreads(number_read_thread, number_write_thread) => {
+                /// Rework to have read and write threads
+                let read_ops_per_thread = max_insert_ops / number_read_thread;
+                let write_ops_per_thread = total_ops / number_write_thread;
+                for keys in keys {
+                    let table = Arc::clone(&table);
+                    let op_mix = Arc::clone(&op_mix);
+                    mix_threads.push(std::thread::spawn(move || {
+                        let mut table = table.pin();
+                        mix(
+                            &mut table,
+                            &keys,
+                            &op_mix,
+                            ops_per_thread,
+                            prefill_per_thread,
+                        )
+                    }));
+                }
+            }
         }
         let _samples: Vec<_> = mix_threads
             .into_iter()
@@ -388,7 +434,7 @@ impl Workload {
         info!(?spent, ops = total_ops, ?avg, "workload mix finished");
 
         let total_ops = total_ops as u64;
-        let threads = self.threads as u32;
+        let threads = total_threads as u32;
 
         Measurement {
             seed,
