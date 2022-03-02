@@ -374,7 +374,10 @@ impl Workload {
         let table = Arc::new(T::with_capacity(initial_capacity));
 
         // And fill it
-        let prefill_per_thread = prefill / total_threads;
+        let prefill_per_thread = match self.threads {
+            Threads::CommonThreads(total_threads) => prefill / total_threads,
+            Threads::SeparatedReadWriteThreads(read_threads, write_threads) => prefill / write_threads
+        };
         let mut prefillers = Vec::new();
         for keys in keys {
             let table = Arc::clone(&table);
@@ -424,8 +427,8 @@ impl Workload {
                 }
             }
             Threads::SeparatedReadWriteThreads(number_read_thread, number_write_thread) => {
-                let write_ops_per_thread = (max_insert_ops / number_write_thread) - 1;
-                let read_ops_per_thread = ((total_ops - max_insert_ops) / number_read_thread) - 1;
+                let write_ops_per_thread = max_insert_ops / number_write_thread;
+                let read_ops_per_thread = (total_ops - max_insert_ops) / number_read_thread;
                 let mut tmp_number_write_threads = number_write_thread;
                 let mut op_mix_write = Vec::with_capacity(100);
                 op_mix_write.append(&mut vec![Operation::Insert; usize::from(self.mix.insert)]);
