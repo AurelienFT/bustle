@@ -27,7 +27,3 @@ num_cpus = "1"
 [[bench]]
 name = "arc_mutex_std"
 harness = false
-
-[[bench]]
-name = "arc_rwlock_std"
-harness = false

@@ -30,10 +30,7 @@
 use std::{fmt, sync::Arc, time::Duration};
 
 use rand::prelude::*;
-use tracing::{
-    debug,
-    info, info_span,
-};
+use tracing::{debug, info, info_span};
 
 /// A workload mix configration.
 ///
@@ -351,8 +348,12 @@ impl Workload {
                 number_read_threads + number_write_threads
             }
         };
+        let write_threads = match self.threads {
+            Threads::CommonThreads(number_threads) => number_threads,
+            Threads::SeparatedReadWriteThreads(_, number_write_threads) => number_write_threads,
+        };
         let insert_keys_per_thread =
-            ((insert_keys + total_threads - 1) / total_threads).next_power_of_two();
+            ((insert_keys + write_threads - 1) / write_threads).next_power_of_two();
         let mut generators = Vec::new();
         for _ in 0..total_threads {
             let mut thread_seed = [0u8; 16];
@@ -376,7 +377,9 @@ impl Workload {
         // And fill it
         let prefill_per_thread = match self.threads {
             Threads::CommonThreads(total_threads) => prefill / total_threads,
-            Threads::SeparatedReadWriteThreads(read_threads, write_threads) => prefill / write_threads
+            Threads::SeparatedReadWriteThreads(read_threads, write_threads) => {
+                prefill / write_threads
+            }
         };
         let mut prefillers = Vec::new();
         for keys in keys {
@@ -435,7 +438,11 @@ impl Workload {
                 op_mix_write.append(&mut vec![Operation::Remove; usize::from(self.mix.remove)]);
                 op_mix_write.append(&mut vec![Operation::Update; usize::from(self.mix.update)]);
                 op_mix_write.append(&mut vec![Operation::Upsert; usize::from(self.mix.upsert)]);
-                op_mix_write.append(&mut vec![Operation::Upsert; usize::from(self.mix.read)]);
+                op_mix_write.append(&mut vec![
+                    Operation::Update;
+                    usize::from(100 - op_mix_write.len())
+                ]);
+                //op_mix_write.append(&mut vec![Operation::Upsert; usize::from(self.mix.read)]);
                 op_mix_write.shuffle(&mut rng);
                 let op_mix_write = Arc::new(op_mix_write.into_boxed_slice());
                 let mut op_mix_read = Vec::with_capacity(100);
@@ -452,7 +459,7 @@ impl Workload {
                                 &mut table,
                                 &keys,
                                 &op_mix_write,
-                                write_ops_per_thread,
+                                write_ops_per_thread - 100,
                                 prefill_per_thread,
                             )
                         }));
@@ -533,6 +540,7 @@ fn mix<H: CollectionHandle>(
         .flat_map(|_| op_mix.iter())
         .enumerate()
     {
+        //println!("{:#?}:{:#?}", i, op);
         if i == ops {
             break;
         }
@@ -555,7 +563,7 @@ fn mix<H: CollectionHandle>(
                 find_seq = (a * find_seq + c) & find_seq_mask;
             }
             Operation::Insert => {
-                let new_key = tbl.insert(&keys[insert_seq - 1]);
+                let new_key = tbl.insert(&keys[insert_seq]);
                 assert!(
                     new_key,
                     "insert({:?}) should insert a new value",
