@@ -27,11 +27,13 @@
     broken_intra_doc_links
 )]
 
-use core::num;
-use std::{sync::Arc, time::Duration, fmt};
+use std::{fmt, sync::Arc, time::Duration};
 
 use rand::prelude::*;
-use tracing::{debug, info, info_span};
+use tracing::{
+    debug,
+    info, info_span,
+};
 
 /// A workload mix configration.
 ///
@@ -97,20 +99,28 @@ impl Mix {
     }
 }
 
-/// WIP
+/// Parameter to define on how many threads run the benchmark.
 #[derive(Clone, Copy, Debug)]
 pub enum Threads {
-    /// WIP
+    /// Read and write are spread between all threads
     CommonThreads(usize),
-    /// WIP
-    SeparatedReadWriteThreads(usize, usize)
+    /// Some threads are for write and other for reading
+    SeparatedReadWriteThreads(usize, usize),
+}
+
+impl From<usize> for Threads {
+    fn from(threads: usize) -> Self {
+        Threads::CommonThreads(threads)
+    }
 }
 
 impl fmt::Display for Threads {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
             Threads::CommonThreads(number) => write!(f, "{}", number),
-            Threads::SeparatedReadWriteThreads(number_read, number_write) => write!(f, "{} read and {} write", number_read, number_write)
+            Threads::SeparatedReadWriteThreads(number_read, number_write) => {
+                write!(f, "{} read and {} write", number_read, number_write)
+            }
         }
     }
 }
@@ -314,18 +324,16 @@ impl Workload {
         let mut rng: rand::rngs::SmallRng = rand::SeedableRng::from_seed(seed);
 
         // NOTE: it'd be nice to include std::intrinsics::type_name::<T> here
-        let span = info_span!("benchmark", mix = ?self.mix /*, threads = self.threads*/);
+        let span = match self.threads {
+            Threads::CommonThreads(number_threads) => {
+                info_span!("benchmark", mix = ?self.mix, threads = number_threads)
+            }
+            Threads::SeparatedReadWriteThreads(number_read_threads, number_write_threads) => {
+                info_span!("benchmark", mix = ?self.mix, read_threads = number_read_threads, write_threads = number_write_threads)
+            }
+        };
         let _guard = span.enter();
         debug!(initial_capacity, total_ops, ?seed, "workload parameters");
-
-        info!("generating operation mix");
-        let mut op_mix = Vec::with_capacity(100);
-        op_mix.append(&mut vec![Operation::Read; usize::from(self.mix.read)]);
-        op_mix.append(&mut vec![Operation::Insert; usize::from(self.mix.insert)]);
-        op_mix.append(&mut vec![Operation::Remove; usize::from(self.mix.remove)]);
-        op_mix.append(&mut vec![Operation::Update; usize::from(self.mix.update)]);
-        op_mix.append(&mut vec![Operation::Upsert; usize::from(self.mix.upsert)]);
-        op_mix.shuffle(&mut rng);
 
         info!("generating key space");
         let prefill = (initial_capacity as f64 * self.prefill_f) as usize;
@@ -339,7 +347,9 @@ impl Workload {
         // array "randomly".
         let total_threads = match self.threads {
             Threads::CommonThreads(number_threads) => number_threads,
-            Threads::SeparatedReadWriteThreads(number_read_threads, number_write_threads) => number_read_threads + number_write_threads
+            Threads::SeparatedReadWriteThreads(number_read_threads, number_write_threads) => {
+                number_read_threads + number_write_threads
+            }
         };
         let insert_keys_per_thread =
             ((insert_keys + total_threads - 1) / total_threads).next_power_of_two();
@@ -383,12 +393,21 @@ impl Workload {
             .collect();
 
         info!("start workload mix");
-        let op_mix = Arc::new(op_mix.into_boxed_slice());
-        let start = std::time::Instant::now();
         let mut mix_threads = Vec::with_capacity(total_threads);
+        let mut start = std::time::Instant::now();
         match self.threads {
             Threads::CommonThreads(number_threads) => {
+                info!("generating operation mix");
+                let mut op_mix = Vec::with_capacity(100);
+                op_mix.append(&mut vec![Operation::Read; usize::from(self.mix.read)]);
+                op_mix.append(&mut vec![Operation::Insert; usize::from(self.mix.insert)]);
+                op_mix.append(&mut vec![Operation::Remove; usize::from(self.mix.remove)]);
+                op_mix.append(&mut vec![Operation::Update; usize::from(self.mix.update)]);
+                op_mix.append(&mut vec![Operation::Upsert; usize::from(self.mix.upsert)]);
+                op_mix.shuffle(&mut rng);
+                let op_mix = Arc::new(op_mix.into_boxed_slice());
                 let ops_per_thread = total_ops / number_threads;
+                start = std::time::Instant::now();
                 for keys in keys {
                     let table = Arc::clone(&table);
                     let op_mix = Arc::clone(&op_mix);
@@ -403,24 +422,51 @@ impl Workload {
                         )
                     }));
                 }
-            },
+            }
             Threads::SeparatedReadWriteThreads(number_read_thread, number_write_thread) => {
-                /// Rework to have read and write threads
-                let read_ops_per_thread = max_insert_ops / number_read_thread;
-                let write_ops_per_thread = total_ops / number_write_thread;
+                let write_ops_per_thread = max_insert_ops / number_read_thread;
+                let read_ops_per_thread = (total_ops - max_insert_ops) / number_write_thread;
+                let mut tmp_number_write_threads = number_write_thread;
+                let mut op_mix_write = Vec::with_capacity(100);
+                op_mix_write.append(&mut vec![Operation::Insert; usize::from(self.mix.insert)]);
+                op_mix_write.append(&mut vec![Operation::Remove; usize::from(self.mix.remove)]);
+                op_mix_write.append(&mut vec![Operation::Update; usize::from(self.mix.update)]);
+                op_mix_write.append(&mut vec![Operation::Upsert; usize::from(self.mix.upsert)]);
+                op_mix_write.append(&mut vec![Operation::Upsert; usize::from(self.mix.read)]);
+                op_mix_write.shuffle(&mut rng);
+                let op_mix_write = Arc::new(op_mix_write.into_boxed_slice());
+                let mut op_mix_read = Vec::with_capacity(100);
+                op_mix_read.append(&mut vec![Operation::Read; 100]);
+                let op_mix_read = Arc::new(op_mix_read.into_boxed_slice());
+                start = std::time::Instant::now();
                 for keys in keys {
                     let table = Arc::clone(&table);
-                    let op_mix = Arc::clone(&op_mix);
-                    mix_threads.push(std::thread::spawn(move || {
-                        let mut table = table.pin();
-                        mix(
-                            &mut table,
-                            &keys,
-                            &op_mix,
-                            ops_per_thread,
-                            prefill_per_thread,
-                        )
-                    }));
+                    if tmp_number_write_threads > 0 {
+                        let op_mix_write = Arc::clone(&op_mix_write);
+                        mix_threads.push(std::thread::spawn(move || {
+                            let mut table = table.pin();
+                            mix(
+                                &mut table,
+                                &keys,
+                                &op_mix_write,
+                                write_ops_per_thread,
+                                prefill_per_thread,
+                            )
+                        }));
+                        tmp_number_write_threads -= 1;
+                    } else {
+                        let op_mix_read = Arc::clone(&op_mix_read);
+                        mix_threads.push(std::thread::spawn(move || {
+                            let mut table = table.pin();
+                            mix(
+                                &mut table,
+                                &keys,
+                                &op_mix_read,
+                                read_ops_per_thread,
+                                prefill_per_thread,
+                            )
+                        }));
+                    }
                 }
             }
         }
