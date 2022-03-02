@@ -424,8 +424,8 @@ impl Workload {
                 }
             }
             Threads::SeparatedReadWriteThreads(number_read_thread, number_write_thread) => {
-                let write_ops_per_thread = max_insert_ops / number_write_thread;
-                let read_ops_per_thread = (total_ops - max_insert_ops) / number_read_thread;
+                let write_ops_per_thread = (max_insert_ops / number_write_thread) - 1;
+                let read_ops_per_thread = ((total_ops - max_insert_ops) / number_read_thread) - 1;
                 let mut tmp_number_write_threads = number_write_thread;
                 let mut op_mix_write = Vec::with_capacity(100);
                 op_mix_write.append(&mut vec![Operation::Insert; usize::from(self.mix.insert)]);
