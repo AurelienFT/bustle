@@ -555,7 +555,7 @@ fn mix<H: CollectionHandle>(
                 find_seq = (a * find_seq + c) & find_seq_mask;
             }
             Operation::Insert => {
-                let new_key = tbl.insert(&keys[insert_seq]);
+                let new_key = tbl.insert(&keys[insert_seq - 1]);
                 assert!(
                     new_key,
                     "insert({:?}) should insert a new value",
