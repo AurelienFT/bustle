@@ -378,7 +378,7 @@ impl Workload {
         let prefill_per_thread = match self.threads {
             Threads::CommonThreads(total_threads) => prefill / total_threads,
             Threads::SeparatedReadWriteThreads(read_threads, write_threads) => {
-                prefill / write_threads
+                prefill / total_threads
             }
         };
         let mut prefillers = Vec::new();
